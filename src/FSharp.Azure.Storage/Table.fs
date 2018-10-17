@@ -388,24 +388,25 @@ module Table =
     module Task =
         open FSharp.Control.Tasks.V2
 
+        let inTableDirectAsync (table: CloudTable) operation = task {
+             let tableOperation = operation |> convertToTableOperation
+             let! result = tableOperation |> table.ExecuteAsync
+             return result |> convertToOperationResult
+        }
+
         let inTableAsync (client: CloudTableClient) tableName operation =
-            task {
-                let table = client.GetTableReference tableName
-                let tableOperation = operation |> convertToTableOperation
-                let! result = tableOperation |> table.ExecuteAsync
-                return result |> convertToOperationResult
-            }
+            inTableDirectAsync (client.GetTableReference tableName) operation
+
+        let inTableAsBatchDirectAsync (table: CloudTable) operations = task {
+            let batchOperation = operations |> createBatchOperation
+            let! results = batchOperation |> table.ExecuteBatchAsync
+            return results |> Seq.map convertToOperationResult |> Seq.toList
+        }
 
         let inTableAsBatchAsync (client: CloudTableClient) tableName operations =
-            task {
-                let table = client.GetTableReference tableName
-                let batchOperation = operations |> createBatchOperation
-                let! results = batchOperation |> table.ExecuteBatchAsync
-                return results |> Seq.map convertToOperationResult |> Seq.toList
-            }
+            inTableAsBatchDirectAsync (client.GetTableReference tableName) operations
 
-        let fromTableSegmentedAsync (client: CloudTableClient) tableName continuationToken (query : EntityQuery<'T>) =
-            let table = client.GetTableReference tableName
+        let fromTableSegmentedDirectAsync (table: CloudTable) continuationToken (query : EntityQuery<'T>) =
             let tableQuery = query.ToTableQuery()
             let resolver = EntityTypeCache.Resolver.Value //Do not inline this otherwise FSharp will delay execution of .Value until the resolver delegate is called
             task {
@@ -413,7 +414,11 @@ module Table =
                 return result.Results, result.ContinuationToken |> toOption
             }
 
-        let fromTableAsync (client: CloudTableClient) tableName (query : EntityQuery<'T>) =
+        let fromTableSegmentedAsync (client: CloudTableClient) tableName continuationToken (query : EntityQuery<'T>) =
+            fromTableSegmentedDirectAsync (client.GetTableReference tableName) continuationToken query
+
+
+        let fromTableDirectAsync (table: CloudTable) (query : EntityQuery<'T>) =
             task {
                 let takeCount = query.TakeCount |> Option.defaultValue Int32.MaxValue
 
@@ -427,7 +432,7 @@ module Table =
                 while shouldContinue do
                     //When using segmentation, the table storage take param is applied to each segment not to the entire resultset
                     //So we need to keep track of how many results we want to actually take and stop early if necessary
-                    let! segmentResult = query |> fromTableSegmentedAsync client tableName token
+                    let! segmentResult = query |> fromTableSegmentedDirectAsync table token
                     let currentResult = segmentResult |> fst
 
                     token <- segmentResult |> snd
@@ -442,6 +447,8 @@ module Table =
 
                 return (allResults :> seq<_>)
             }
+        let fromTableAsync (client: CloudTableClient) tableName (query : EntityQuery<'T>) =
+            fromTableDirectAsync (client.GetTableReference tableName) query
 
     let inTableAsync (client: CloudTableClient) tableName operation =
         async { return! Task.inTableAsync client tableName operation |> Async.AwaitTask }
